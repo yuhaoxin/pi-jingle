@@ -123,47 +123,69 @@ async function stopSong(pi: ExtensionAPI): Promise<void> {
   }
 }
 
+// 每个平台的播放器候选，按顺序尝试，第一个退出码为 0 的胜出。
+// 能应用音量的播放器排在前面；不支持音量的播放器保留为兜底，使缺少 ffplay 的机器
+// （macOS 默认不带 ffplay）仍然能出声，只是音量参数被忽略。
+function buildPlayCommands(
+  platform: string,
+  soundPath: string,
+  volume?: number
+): { cmd: string; args: string[] }[] {
+  const plainFfplay = {
+    cmd: "ffplay",
+    args: ["-nodisp", "-autoexit", "-loglevel", "quiet", soundPath]
+  };
+  const hasVolume = volume !== undefined && volume !== null;
+
+  if (platform === "darwin") {
+    return [
+      ...(hasVolume ? [{ cmd: "afplay", args: ["-v", String(volume), soundPath] }] : []),
+      { cmd: "afplay", args: [soundPath] },
+      plainFfplay
+    ];
+  }
+
+  if (platform === "linux") {
+    if (!hasVolume) {
+      return [
+        { cmd: "paplay", args: [soundPath] },
+        { cmd: "aplay", args: [soundPath] },
+        plainFfplay
+      ];
+    }
+    return [
+      // paplay 的音量取 PulseAudio 的整数范围 0-65536
+      { cmd: "paplay", args: [`--volume=${Math.round(volume * 65536)}`, soundPath] },
+      {
+        cmd: "ffplay",
+        args: ["-nodisp", "-autoexit", "-loglevel", "quiet", "-af", `volume=${volume}`, soundPath]
+      },
+      { cmd: "paplay", args: [soundPath] },
+      { cmd: "aplay", args: [soundPath] }
+    ];
+  }
+
+  if (platform === "win32") {
+    // PowerShell 的 SoundPlayer 不支持音量
+    return [
+      {
+        cmd: "powershell",
+        args: [
+          "-NoProfile",
+          "-Command",
+          `(New-Object System.Media.SoundPlayer '${soundPath.replace(/'/g, "''")}').PlaySync()`
+        ]
+      }
+    ];
+  }
+
+  return [plainFfplay];
+}
+
 async function playSound(soundPath: string, pi: ExtensionAPI, volume?: number): Promise<void> {
   const expandedPath = expandPath(soundPath);
 
-  // Build command list based on whether volume is specified
-  const commands: { cmd: string; args: string[] }[] = [];
-
-  if (volume !== undefined && volume !== null) {
-    // Volume specified: use ffplay with volume filter (cross-platform)
-    commands.push({
-      cmd: "ffplay",
-      args: ["-nodisp", "-autoexit", "-loglevel", "quiet", "-af", `volume=${volume}`, expandedPath]
-    });
-  }
-
-  // Add players without volume support (fallback)
-  if (process.platform === "darwin") {
-    commands.push({ cmd: "afplay", args: [expandedPath] });
-  } else if (process.platform === "linux") {
-    commands.push({ cmd: "paplay", args: [expandedPath] });
-    commands.push({ cmd: "aplay", args: [expandedPath] });
-  }
-
-  // Always add ffplay as fallback (works but without volume)
-  commands.push({
-    cmd: "ffplay",
-    args: ["-nodisp", "-autoexit", "-loglevel", "quiet", expandedPath]
-  });
-
-  // Windows fallback
-  if (process.platform === "win32") {
-    commands.push({
-      cmd: "powershell",
-      args: [
-        "-NoProfile",
-        "-Command",
-        `(New-Object System.Media.SoundPlayer '${expandedPath.replace(/'/g, "''")}').PlaySync()`
-      ],
-    });
-  }
-
-  for (const { cmd, args } of commands) {
+  for (const { cmd, args } of buildPlayCommands(process.platform, expandedPath, volume)) {
     try {
       const result = await pi.exec(cmd, args, { timeout: 5000 });
       if (result?.code === 0) return;
@@ -179,6 +201,7 @@ export default async function(pi_: ExtensionAPI) {
   // Supported events that can have sounds
   const supportedEvents = [
     "agent_end",
+    "agent_settled",
     "agent_start",
     "turn_start",
     "turn_end",
@@ -186,6 +209,7 @@ export default async function(pi_: ExtensionAPI) {
     "session_shutdown",
     "tool_call",
     "tool_result",
+    "ui_prompt_start",
   ];
 
   // Load config on startup
@@ -196,7 +220,8 @@ export default async function(pi_: ExtensionAPI) {
     if (Object.keys(sounds).length === 0) {
       const defaultSound = getDefaultSoundPath();
       if (defaultSound) {
-        sounds = { agent_end: defaultSound };
+        // agent_end 会在自动重试、自动压缩或排队后续消息时也触发，agent_settled 才是"pi 不会再自动继续、等用户输入"的时刻；两者相邻触发，同时启用会连响两声。
+        sounds = { agent_settled: defaultSound, ui_prompt_start: defaultSound };
       }
     }
   });

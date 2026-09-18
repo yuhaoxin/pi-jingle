@@ -1,6 +1,6 @@
 {
   "name": "pi-jingle",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "Play sounds on pi events like agent_start and agent_end",
   "keywords": [
     "pi-package"
@@ -16,5 +16,5 @@
     "README.md",
     "sounds/"
   ],
-  "repository": "github:Git-Monke/pi-jingle"
+  "repository": "github:yuhaoxin/pi-jingle"
 }
